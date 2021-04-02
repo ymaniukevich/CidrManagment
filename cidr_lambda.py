@@ -1,7 +1,5 @@
 import boto3
 import ipaddress
-import json
-import math
 from netaddr import IPNetwork
 from faker import Faker
 
@@ -10,7 +8,6 @@ dynamodbTableName = "vpc_cidr"
 dynamodb = boto3.resource('dynamodb')
 
 def getCidrDDB(dynamodbTableName):
-
     # Vpc_cidr is the table name here
     table = dynamodb.Table(dynamodbTableName)
     # Table scan
@@ -21,31 +18,41 @@ def getCidrDDB(dynamodbTableName):
     return list_of_cidr
 
 def CidrSplitter(network, count):
-    #Get smallest power of 2 greater than (or equal to) a given x. 
-    def power_log(x):
-        return 2**(math.ceil(math.log(x, 2)))
-    #Newton's method for calculating square roots.
-    def isqrt(n):
-        x = n
-        y = (x + 1) // 2
-        while y < x:
-            x = y
-            y = (x + n // x) // 2
-        return x
-    # Get the main network, to divide onto predefined parts
+    # Finding the minimum power of two 
+    def power_of_two(count):
+        if count > 1:
+            for i in range(1, int(count)):
+                if (2 ** i >= count):
+                    return i
+        else:
+            return 1
+    # Get the main network
     pair = ipaddress.ip_network(network, strict=False)
-    # Get the require number of subnets to which the network will be divided
-    parts = count
-    # Extracting netmask of the main network in CIDR
-    prefix = pair.prefixlen
-    # Awareness of subnets' prefix, to divide main network onto
-    subnet_diff = isqrt(power_log(float(parts)))
+    
+    # The subnet prefix to be added to the original to split the main network into
+    subnet_diff = power_of_two(count)
+
     # Get subnets of the main network, as a list
     subnets = list(pair.subnets(prefixlen_diff=subnet_diff))
-    return subnets
-print(CidrSplitter("10.5.0.0/16",2))
+    subnet_map = {}
+    for _ in range(0,count):
+        subnet_map[_+1] = str(subnets[_])
+    return {network:subnet_map}
 
 def GeneratorRandomCidr(netmask):
     fake = Faker()
     return str(IPNetwork(fake.ipv4_private()+'/{0}'.format(netmask)).cidr)
+
+
+def main(dynamodbTableName, netmask, subnet_count):
+    # Generate cidr
+    cidr = GeneratorRandomCidr(netmask)
+
+    # Checking if cidr is not used
+    while cidr in getCidrDDB(dynamodbTableName):
+        cidr = GeneratorRandomCidr(netmask)
+    return CidrSplitter(cidr, subnet_count)
+
+print(main(dynamodbTableName,16,4))
+
 
