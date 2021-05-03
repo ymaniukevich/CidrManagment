@@ -6,14 +6,13 @@ from faker import Faker
 import re
 import itertools
 import time
+import ast
 
-input_public_cidr = ['/31', '/31', '/31']
-input_private_cidr = ['/31','/31','/31']
-input_database_cidr = ['/31','/31','/31']
-input_dmz_cidr = ['/31', '/31','/31','/31']
+dynamodb = 'dev_vpc_cidr'
+
+# Find Suit subnet in order to split
 
 
-#Find Suit subnet in order to split
 def closest(lst, prefix):
     suitable_prefix = next((i for i in lst if prefix >= i), None)
     if suitable_prefix == None:
@@ -22,7 +21,9 @@ def closest(lst, prefix):
     return suitable_prefix
 
 # Generate random CIDR
-def GeneratorRandomCidr(VpcMask, AllExistsVpc = []):
+
+
+def GeneratorRandomCidr(VpcMask, AllExistsVpc=[]):
     fake = Faker()
     vpc_cidr = str(IPNetwork(fake.ipv4_private() +
                              '/{0}'.format(VpcMask)).cidr)
@@ -30,6 +31,7 @@ def GeneratorRandomCidr(VpcMask, AllExistsVpc = []):
         vpc_cidr = str(IPNetwork(fake.ipv4_private() +
                                  '/{0}'.format(VpcMask)).cidr)
     return vpc_cidr
+
 
 def discover_new_subnets(used_cidrs, desired_public_cidr=[]):
     # The function compares used and desired prefix, if there are changes, the whole sequence will be removed.
@@ -50,6 +52,7 @@ def discover_new_subnets(used_cidrs, desired_public_cidr=[]):
     new_prefix = [_[1:] for _ in new_prefix]
     print
     return used_cidrs, new_prefix
+
 
 class IPSplitter():
     def __init__(self, vpc_cidr, used_subnets=[]):
@@ -75,7 +78,7 @@ class IPSplitter():
 
     # Finding suitable subnets (by the closest prefix), splitting getting subnets
     def GetSubnet(self, prefix):
-        self.get_free_subnets()
+        self.GetFreeSubnets()
     # Return all prefix of free subnet: [30, 29, 28]
         free_subnets_prefix = [_.prefixlen for _ in self.availible_subnets]
     # Return max prefix of suit subnets: 28
@@ -92,6 +95,7 @@ class IPSplitter():
             cidr_exclude(cidr, subnet[0])
         return str(subnet[0])
 
+
 class DynamoDB():
     def __init__(self, DynamoTableName, iad_id):
         dynamodb = boto3.resource('dynamodb')
@@ -99,6 +103,7 @@ class DynamoDB():
         self.dynamodb_table_name = DynamoTableName
         self.iad_id = iad_id
     # Checking if an VPC exists in the DynamoDB by IAD tag
+
     def VpcExists(self):
         try:
             item = self.table.get_item(Key={'iad_id': self.iad_id})['Item']
@@ -125,68 +130,100 @@ class DynamoDB():
         )
         return response
     # Creating Item in DynamoDB
+
     def CreateItemsDDB(self, new_item_content):
         response = self.table.put_item(
-            Item = new_item_content
-    )           
+            Item=new_item_content
+        )
 
-##########
-## Main ##
-##########
-# if vpc exist in DynamoDB, otherwise will create
-iad_platform = "iad"
-iad_region = "na"
-iad_environment = ""
-vpc_masks = 8
-iad_id = "{0}/{1}/{2}".format(iad_platform, iad_region, iad_environment)
 
-dynamodbTableName = "dev_vpc_cidr"
-db = DynamoDB(dynamodbTableName, iad_id)
-if db.VpcExists():
-    vpc_network = db.VpcExists()
-    vpc_cidr = vpc_network['vpc_cidr']
-    database_cidrs = vpc_network.get('database_subnets', list())
-    private_cidrs = vpc_network.get('private_subnets', list())
-    public_cidrs = vpc_network.get('public_subnets', list())
-    dmz_cidrs = vpc_network.get('dmz_subnets', list())
-    used_subnets = database_cidrs + private_cidrs + public_cidrs + dmz_cidrs
+def main(event, dynamodbTableName, iad_id, vpc_mask, input_public_masks, input_private_masks, input_database_masks, input_dmz_masks):
+    db = DynamoDB(dynamodbTableName, iad_id)
+    if db.VpcExists():
+        vpc_network = db.VpcExists()
+        vpc_cidr = vpc_network['vpc_cidr']
+        database_cidrs = vpc_network.get('database_subnets', list())
+        private_cidrs = vpc_network.get('private_subnets', list())
+        public_cidrs = vpc_network.get('public_subnets', list())
+        dmz_cidrs = vpc_network.get('dmz_subnets', list())
+        used_subnets = database_cidrs + private_cidrs + public_cidrs + dmz_cidrs
 # Find diff between existing subnet and new
-    public_cidrs, new_public_mask = discover_new_subnets(
-        public_cidrs, input_public_cidr)
-    private_cidrs, new_private_mask = discover_new_subnets(
-        private_cidrs, input_private_cidr)
-    database_cidrs, new_database_mask = discover_new_subnets(
-        database_cidrs, input_database_cidr)
-    dmz_cidrs, new_dmz_mask = discover_new_subnets(dmz_cidrs, input_dmz_cidr)
+        public_cidrs, new_public_mask = discover_new_subnets(
+            public_cidrs, input_public_masks)
+        private_cidrs, new_private_mask = discover_new_subnets(
+            private_cidrs, input_private_masks)
+        database_cidrs, new_database_mask = discover_new_subnets(
+            database_cidrs, input_database_masks)
+        dmz_cidrs, new_dmz_mask = discover_new_subnets(
+            dmz_cidrs, input_dmz_masks)
 # Getting new subnets cidr, and plus with old items
-    vpc = IPSplitter(vpc_cidr, used_subnets)
-    public_cidrs = public_cidrs + \
-        [vpc.GetSubnet(int(_)) for _ in new_public_mask]
-    private_cidrs = private_cidrs + \
-        [vpc.GetSubnet(int(_)) for _ in new_private_mask]
-    database_cidrs = database_cidrs + \
-        [vpc.GetSubnet(int(_)) for _ in new_database_mask]
-    dmz_cidrs = dmz_cidrs + [vpc.GetSubnet(int(_)) for _ in new_dmz_mask]
+        vpc = IPSplitter(vpc_cidr, used_subnets)
+        public_cidrs = public_cidrs + \
+            [vpc.GetSubnet(int(_)) for _ in new_public_mask]
+        private_cidrs = private_cidrs + \
+            [vpc.GetSubnet(int(_)) for _ in new_private_mask]
+        database_cidrs = database_cidrs + \
+            [vpc.GetSubnet(int(_)) for _ in new_database_mask]
+        dmz_cidrs = dmz_cidrs + [vpc.GetSubnet(int(_)) for _ in new_dmz_mask]
 # Update DunamoDB table
-    db.UpdateItemsDDB('public_subnets', public_cidrs)
-    db.UpdateItemsDDB('private_subnets', private_cidrs)
-    db.UpdateItemsDDB('database_subnets', database_cidrs)
-    db.UpdateItemsDDB('dmz_subnets', dmz_cidrs)
-else:
-    vpc_cidr = GeneratorRandomCidr(dynamodbTableName, vpc_masks, db.GetAllVpc())
-    vpc = IPSplitter(vpc_cidr)
-    public_cidrs = [ vpc.GetSubnet(int(_[1:])) for _ in input_public_cidr]
-    private_cidrs = [ vpc.GetSubnet(int(_[1:])) for _ in input_private_cidr]
-    database_cidrs = [ vpc.GetSubnet(int(_[1:])) for _ in input_database_cidr]
-    dmz_cidrs = [ vpc.GetSubnet(int(_[1:])) for _ in input_dmz_cidr]
-    
-    content_of_item = {
-        'iad_id': iad_id,
-        'vpc_cidr': vpc_cidr,
-        'public_subnets': public_cidrs,
-        'private_subnets': private_cidrs,
-        'database_subnets': database_cidrs,
-        'dmz_subnets': dmz_cidrs
-    }
-    
-    db.CreateItemsDDB(content_of_item)
+        db.UpdateItemsDDB('public_subnets', public_cidrs)
+        db.UpdateItemsDDB('private_subnets', private_cidrs)
+        db.UpdateItemsDDB('database_subnets', database_cidrs)
+        db.UpdateItemsDDB('dmz_subnets', dmz_cidrs)
+        return { 
+            'vpc_cidr': vpc_cidr,
+            'public_subnets': public_cidrs,
+            'private_subnets': private_cidrs,
+            'database_subnets': database_cidrs,
+            'dmz_subnets': dmz_cidrs
+        }
+    else:
+        vpc_cidr = GeneratorRandomCidr(vpc_mask, db.GetAllVpc())
+        vpc = IPSplitter(vpc_cidr)
+        public_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_public_masks]
+        private_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_private_masks]
+        database_cidrs = [vpc.GetSubnet(int(_[1:]))
+                          for _ in input_database_masks]
+        dmz_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_dmz_masks]
+
+        content_of_item = {
+            'iad_id': iad_id,
+            'vpc_cidr': vpc_cidr,
+            'public_subnets': public_cidrs,
+            'private_subnets': private_cidrs,
+            'database_subnets': database_cidrs,
+            'dmz_subnets': dmz_cidrs
+        }
+
+        db.CreateItemsDDB(content_of_item)
+
+        return { 
+            'vpc_cidr': vpc_cidr,
+            'public_subnets': public_cidrs,
+            'private_subnets': private_cidrs,
+            'database_subnets': database_cidrs,
+            'dmz_subnets': dmz_cidrs
+        }
+
+event = {
+    "iad_id": "iad/na/dev5",
+    "vpc_mask": "/16",
+    "public": "['/31','/31','/31']",
+    "private": "[]",
+    "database": "[]",
+    "dmz": "[]"
+}
+
+
+def lambda_handler(event):
+    dynamodbTableName = 'dev_vpc_cidr'
+    iad_id = event['iad_id']
+    vpc_mask = int(event['vpc_mask'][1:])
+
+    input_public_masks = ast.literal_eval(event['public'])
+    input_private_masks = ast.literal_eval(event['private'])
+    input_database_masks = ast.literal_eval(event['database'])
+    input_dmz_masks = ast.literal_eval(event['dmz'])
+
+    return main(event, dynamodbTableName, iad_id, vpc_mask, input_public_masks,
+             input_private_masks, input_database_masks, input_dmz_masks)
