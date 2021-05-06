@@ -4,7 +4,6 @@ import ipaddress
 from faker import Faker
 import re
 import itertools
-import ast
 
 # Find Suit subnet in order to split
 def closest(lst, prefix):
@@ -123,11 +122,46 @@ class DynamoDB():
             Item=new_item_content
         )
 
-def main(event, dynamodbTableName, iad_id, vpc_mask, input_public_masks, input_private_masks, input_database_masks, input_dmz_masks):
+    def DeleteItemDDB(self):
+        response = self.table.delete_item(
+            Key={
+                'iad_id' : self.iad_id
+            })
+
+def main(dynamodbTableName, event):
+#event = {
+#    "iad_id"         : "iad/apac/dev_iad",
+#    "vpc_cidr_block" : "172.0.0.0/8",
+#    "vpc_mask"       : "",
+#    "public"         : "['172.0.0.0/20',  '172.0.16.0/20',  '172.0.32.0/20' ]",
+#    "private"        : "[]",
+#    "database"       : "[]",
+#    "dmz"            : "[]"
+#}
+    # Parsing event
+    iad_id = event['iad_id']
+    vpc_mask = int(event['vpc_mask'][1:]) if event['vpc_mask'] else event['vpc_mask']
+    vpc_cidr_block = event['vpc_cidr_block'] if event['vpc_cidr_block'] else event['vpc_cidr_block']
+
+    input_public = eval(event['public'])
+    input_private = eval(event['private'])
+    input_database = eval(event['database'])
+    input_dmz = eval(event['dmz'])
+
+    # Basic input validation
+    if event['vpc_mask'] and event['vpc_mask'][0] != '/':
+        raise Exception("Invalid VPC mask")
+        subnets = input_public + input_private + input_database + input_dmz
+        for _ in subnets:
+            if _[0] != '/':
+                raise Exception("Invalid subnets mask")
+
     db = DynamoDB(dynamodbTableName, iad_id)
     if db.VpcExists():
         vpc_network = db.VpcExists()
         vpc_cidr = vpc_network['vpc_cidr']
+
+        # If the netmask is equal to the input mask (from event)
         if vpc_mask == int(re.search('\/(.*)', vpc_cidr).group(0)[1:]):
             database_cidrs = vpc_network.get('database_subnets', list())
             private_cidrs = vpc_network.get('private_subnets', list())
@@ -136,13 +170,13 @@ def main(event, dynamodbTableName, iad_id, vpc_mask, input_public_masks, input_p
             used_subnets = database_cidrs + private_cidrs + public_cidrs + dmz_cidrs
             # Find diff between existing subnet and new
             public_cidrs, new_public_mask = discover_new_subnets(
-                public_cidrs, input_public_masks)
+                public_cidrs, input_public)
             private_cidrs, new_private_mask = discover_new_subnets(
-                private_cidrs, input_private_masks)
+                private_cidrs, input_private)
             database_cidrs, new_database_mask = discover_new_subnets(
-                database_cidrs, input_database_masks)
+                database_cidrs, input_database)
             dmz_cidrs, new_dmz_mask = discover_new_subnets(
-                dmz_cidrs, input_dmz_masks)
+                dmz_cidrs, input_dmz)
             # Getting new subnets cidr, and plus with old items
             vpc = IPSplitter(vpc_cidr, used_subnets)
             public_cidrs = public_cidrs + \
@@ -165,56 +199,123 @@ def main(event, dynamodbTableName, iad_id, vpc_mask, input_public_masks, input_p
                 'dmz_subnets': dmz_cidrs
             }
         else:
+            # If new mask differ from current. Will created new VPC range
+            if vpc_mask:
+                vpc_cidr = GeneratorRandomCidr(vpc_mask, db.GetAllVpc())
+                vpc = IPSplitter(vpc_cidr)
+                public_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_public]
+                private_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_private]
+                database_cidrs = [vpc.GetSubnet(int(_[1:]))
+                                  for _ in input_database]
+                dmz_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_dmz]
+                db.UpdateItemsDDB('vpc_cidr', vpc_cidr)
+                db.UpdateItemsDDB('public_subnets', public_cidrs)
+                db.UpdateItemsDDB('private_subnets', private_cidrs)
+                db.UpdateItemsDDB('database_subnets', database_cidrs)
+                db.UpdateItemsDDB('dmz_subnets', dmz_cidrs)
+                return { 
+                    'vpc_cidr': vpc_cidr,
+                    'public_subnets': public_cidrs,
+                    'private_subnets': private_cidrs,
+                    'database_subnets': database_cidrs,
+                    'dmz_subnets': dmz_cidrs
+                }
+            # If the input VPC is managed manually through tfvars file
+            elif vpc_cidr_block:
+                db.UpdateItemsDDB('vpc_cidr', vpc_cidr_block)
+                db.UpdateItemsDDB('public_subnets', input_public)
+                db.UpdateItemsDDB('private_subnets', input_private)
+                db.UpdateItemsDDB('database_subnets', input_database)
+                db.UpdateItemsDDB('dmz_subnets', input_dmz)
+                return { 
+                    'vpc_cidr': vpc_cidr_block,
+                    'public_subnets': input_public,
+                    'private_subnets': input_private,
+                    'database_subnets': input_database,
+                    'dmz_subnets': input_dmz
+                }
+    else:
+        # If the network is new
+        if vpc_mask:
             vpc_cidr = GeneratorRandomCidr(vpc_mask, db.GetAllVpc())
             vpc = IPSplitter(vpc_cidr)
-            public_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_public_masks]
-            private_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_private_masks]
+            public_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_public]
+            private_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_private]
             database_cidrs = [vpc.GetSubnet(int(_[1:]))
-                              for _ in input_database_masks]
-            dmz_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_dmz_masks]
-            db.UpdateItemsDDB('vpc_cidr', vpc_cidr)
-            db.UpdateItemsDDB('public_subnets', public_cidrs)
-            db.UpdateItemsDDB('private_subnets', private_cidrs)
-            db.UpdateItemsDDB('database_subnets', database_cidrs)
-            db.UpdateItemsDDB('dmz_subnets', dmz_cidrs)
-    else:
-        vpc_cidr = GeneratorRandomCidr(vpc_mask, db.GetAllVpc())
-        vpc = IPSplitter(vpc_cidr)
-        public_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_public_masks]
-        private_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_private_masks]
-        database_cidrs = [vpc.GetSubnet(int(_[1:]))
-                          for _ in input_database_masks]
-        dmz_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_dmz_masks]
+                          for _ in input_database]
+            dmz_cidrs = [vpc.GetSubnet(int(_[1:])) for _ in input_dmz]
+            content_of_item = {
+                'iad_id': iad_id,
+                'vpc_cidr': vpc_cidr,
+                'public_subnets': public_cidrs,
+                'private_subnets': private_cidrs,
+                'database_subnets': database_cidrs,
+                'dmz_subnets': dmz_cidrs
+            }
+            db.CreateItemsDDB(content_of_item)
+            return { 
+                'vpc_cidr': vpc_cidr,
+                'public_subnets': public_cidrs,
+                'private_subnets': private_cidrs,
+                'database_subnets': database_cidrs,
+                'dmz_subnets': dmz_cidrs
+            }
 
-        content_of_item = {
-            'iad_id': iad_id,
-            'vpc_cidr': vpc_cidr,
-            'public_subnets': public_cidrs,
-            'private_subnets': private_cidrs,
-            'database_subnets': database_cidrs,
-            'dmz_subnets': dmz_cidrs
-        }
+        #  If the input VPC is managed manually through tfvars file
+        elif vpc_cidr_block:
+            content_of_item = {
+                'iad_id': iad_id,
+                'vpc_cidr': vpc_cidr_block,
+                'public_subnets': input_public,
+                'private_subnets': input_private,
+                'database_subnets': input_database,
+                'dmz_subnets': input_dmz
+             }
+            db.CreateItemsDDB(content_of_item)
+            return { 
+                'vpc_cidr': vpc_cidr_block,
+                'public_subnets': input_public,
+                'private_subnets': input_private,
+                'database_subnets': input_database,
+                'dmz_subnets': input_dmz
+            }
 
-        db.CreateItemsDDB(content_of_item)
-
-        return { 
-            'vpc_cidr': vpc_cidr,
-            'public_subnets': public_cidrs,
-            'private_subnets': private_cidrs,
-            'database_subnets': database_cidrs,
-            'dmz_subnets': dmz_cidrs
-        }
 
 def lambda_handler(event, context):
-    dynamodbTableName = 'dev_vpc_cidr'
-    iad_id = event['iad_id']
-    vpc_mask = int(event['vpc_mask'][1:])
+    dynamodbTableName = "dev_vpc_cidr"
+    if event["state"] == "register":
+        return main(dynamodbTableName, event)
 
-    input_public_masks = eval(event['public'])
-    input_private_masks = eval(event['private'])
-    input_database_masks = eval(event['database'])
-    input_dmz_masks = eval(event['dmz'])
+    elif event["state"] == "deregister":
+        dynamodbTableName = 'dev_vpc_cidr'
+        db = DynamoDB(dynamodbTableName, event["iad_id"]).DeleteItemDDB()
 
+  
+#event = {
+#    "state"          : "register",
+#    "iad_id"         : "iad/apac/dev_iad",
+#    "vpc_cidr_block" : "172.0.0.0/8",
+#    "vpc_mask"       : "",
+#    "public"         : "[]",
+#    "private"        : "[]",
+#    "database"       : "[]",
+#    "dmz"            : "[]"
+#}
 
-    return main(event, dynamodbTableName, iad_id, vpc_mask, input_public_masks,
-             input_private_masks, input_database_masks, input_dmz_masks)
+#event = 
+# 
+#    "state"          : "register",
+#    "iad_id"         : "iad/na/dev",
+#    "vpc_mask"       : "/28",
+#    "vpc_cidr_block" : "",
+#    "public"         : "['/30','/30']",
+#    "private"        : "['/30']",
+#    "database"       : "['/30']",
+#    "dmz"            : "[]"
+#}
+#
+#event = 
+# { 
+#    "state" : "deregister",
+#    "iad_id" : "iad/na/dev"
+#}
