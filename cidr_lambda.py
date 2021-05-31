@@ -1,9 +1,13 @@
+import add_deps_path
 import boto3
 from netaddr import IPNetwork, cidr_merge, cidr_exclude, IPAddress
 import ipaddress
 from faker import Faker
 import re
 import itertools
+import os
+
+dynamodbTableName = os.environ["DYNAMODB_TABLE_NAME"]
 
 # Find Suit subnet in order to split
 def closest(lst, prefix):
@@ -83,7 +87,7 @@ class IPSplitter():
         return str(subnet[0])
 
 class DynamoDB():
-    def __init__(self, DynamoTableName, iad_id):
+    def __init__(self, DynamoTableName, iad_id = ""):
         dynamodb = boto3.resource('dynamodb')
         self.table = dynamodb.Table(DynamoTableName)
         self.dynamodb_table_name = DynamoTableName
@@ -129,15 +133,6 @@ class DynamoDB():
             })
 
 def main(dynamodbTableName, event):
-#event = {
-#    "iad_id"         : "iad/apac/dev_iad",
-#    "vpc_cidr_block" : "172.0.0.0/8",
-#    "vpc_mask"       : "",
-#    "public"         : "['172.0.0.0/20',  '172.0.16.0/20',  '172.0.32.0/20' ]",
-#    "private"        : "[]",
-#    "database"       : "[]",
-#    "dmz"            : "[]"
-#}
     # Parsing event
     iad_id = event['iad_id']
     vpc_mask = int(event['vpc_mask'][1:]) if event['vpc_mask'] else event['vpc_mask']
@@ -280,17 +275,17 @@ def main(dynamodbTableName, event):
                 'dmz_subnets': input_dmz
             }
 
-
 def lambda_handler(event, context):
-    dynamodbTableName = "dev_vpc_cidr"
     if event["state"] == "register":
         return main(dynamodbTableName, event)
 
     elif event["state"] == "deregister":
-        dynamodbTableName = 'dev_vpc_cidr'
         db = DynamoDB(dynamodbTableName, event["iad_id"]).DeleteItemDDB()
-
-  
+        return event["iad_id"]
+    elif event["state"] == "get_vpc":
+        db = DynamoDB(dynamodbTableName)
+        vpc_cidr = GeneratorRandomCidr(event['vpc_mask'][1:], db.GetAllVpc())
+        return vpc_cidr
 #event = {
 #    "state"          : "register",
 #    "iad_id"         : "iad/apac/dev_iad",
@@ -302,8 +297,7 @@ def lambda_handler(event, context):
 #    "dmz"            : "[]"
 #}
 
-#event = 
-# 
+#event = {
 #    "state"          : "register",
 #    "iad_id"         : "iad/na/dev",
 #    "vpc_mask"       : "/28",
@@ -314,8 +308,11 @@ def lambda_handler(event, context):
 #    "dmz"            : "[]"
 #}
 #
-#event = 
-# { 
+#event = { 
 #    "state" : "deregister",
 #    "iad_id" : "iad/na/dev"
+#}
+#event = { 
+#    "state"    : "get_vpc",
+#    "vpc_mask" : "/28"
 #}
